@@ -1,5 +1,98 @@
 # Analisi del Comportamento TCP con Wireshark
 
+## Guida rapida (aggiunta): cosa contiene `tcp.pcap` e come analizzarlo
+
+Difficoltà: intermedia | Tempo stimato: 60-90 minuti | Strumenti: Wireshark (GUI) oppure `tshark`
+
+### Prerequisiti
+
+- Wireshark 3.x o superiore (`sudo apt install wireshark`) oppure solo `tshark` (`sudo apt install tshark`).
+- Concetti: handshake a tre vie, numeri di sequenza/ACK, finestra del ricevente (`Win`), MSS, RTT, slow start.
+- Apertura: `wireshark Wireshark/TCP/tcp.pcap` oppure `tshark -r Wireshark/TCP/tcp.pcap`.
+
+### Contenuto del file (verificato con `tshark` e `capinfos`)
+
+| Proprietà | Valore |
+|---|---|
+| Pacchetti | 213 |
+| Durata | 7,6 s (cattura del 21/08/2004, Ethernet) |
+| Connessione principale | `192.168.1.102:1161` verso `128.119.245.12:80` (gaia.cs.umass.edu), 201 frame |
+| Operazione | un `POST /ethereal-labs/lab3-1-reply.htm` che carica un file da circa 150 KB (164090 byte di dati dal client) e la risposta `HTTP/1.1 200 OK` (frame 203) |
+| Altro traffico | un SYN isolato (frame 213, `192.168.1.102:1162` verso `199.2.53.206:631`, porta di stampa IPP) e 9 pacchetti SSDP (UDP 1900) da `192.168.1.100`: rumore da ignorare |
+| Handshake | frame 1 `SYN` (Seq=0, MSS 1460), frame 2 `SYN,ACK` (Seq=0, Ack=1, Win=5840), frame 3 `ACK` |
+| Primi segmenti dati del client | frame 4 (Seq=1, 565 byte, contiene le intestazioni HTTP del POST), poi Seq=566, 2026, 3486, 4946, 6406 con 1460 byte ciascuno (MSS) |
+| Ritrasmissioni | nessuna (`tcp.analysis.retransmission` non seleziona alcun frame) |
+| Finestra annunciata dal server | minimo 5840 byte (all'handshake) |
+| Chiusura | nessun FIN/RST nella traccia: la cattura termina dopo la risposta HTTP |
+
+I numeri coincidono con le soluzioni riportate più sotto.
+
+### Filtri di visualizzazione utili (Wireshark e `tshark -Y`)
+
+| Obiettivo | Filtro |
+|---|---|
+| Solo la connessione del lab | `tcp.port == 1161` oppure `tcp.stream == 0` |
+| Handshake | `tcp.flags.syn == 1` |
+| Solo dati dal client | `ip.src == 192.168.1.102 && tcp.len > 0` |
+| Solo ACK dal server | `ip.src == 128.119.245.12 && tcp.len == 0` |
+| Ritrasmissioni, ACK duplicati | `tcp.analysis.retransmission`, `tcp.analysis.duplicate_ack` |
+| RTT di ciascun ACK | `tcp.analysis.ack_rtt` (colonna: `Statistica > Grafici`, o campo `tcp.analysis.ack_rtt`) |
+| Messaggi HTTP | `http` (il lab invita a disabilitarlo per vedere i soli segmenti TCP) |
+
+### Esempi con tshark
+
+```bash
+cd Wireshark/TCP
+tshark -r tcp.pcap -c 12                          # primi 12 pacchetti
+tshark -r tcp.pcap -q -z conv,tcp                 # conversazioni TCP
+tshark -r tcp.pcap -Y 'tcp.flags.syn==1'          # handshake
+tshark -r tcp.pcap -Y 'tcp.analysis.retransmission' | wc -l     # restituisce 0
+tshark -r tcp.pcap -Y 'ip.src==192.168.1.102 && tcp.dstport==80 && tcp.len>0' \
+       -T fields -e frame.number -e tcp.seq -e tcp.len | head -7
+tshark -r tcp.pcap -Y 'tcp.analysis.ack_rtt' -T fields -e frame.number -e tcp.analysis.ack_rtt | head
+tshark -r tcp.pcap -Y 'ip.src==128.119.245.12 && tcp.srcport==80' \
+       -T fields -e tcp.window_size_value | sort -n | head -1       # 5840
+```
+
+Output verificato del primo comando (estratto): `1 ... [SYN] Seq=0 Win=16384 Len=0 MSS=1460`, `2 ... [SYN, ACK] Seq=0 Ack=1 Win=5840 ...`, `4 ... POST /ethereal-labs/lab3-1-reply.htm HTTP/1.1`.
+
+### Procedura nella GUI
+
+1. `File > Apri` e scegli `tcp.pcap`.
+2. Applica il filtro `tcp.port == 1161` per isolare la connessione.
+3. Seleziona il frame 1 e nel pannello dettagli espandi *Transmission Control Protocol*: osserva `Sequence Number`, `Flags`, `Window`, `Options`.
+4. Per i grafici: scegli un pacchetto del client e apri `Statistiche > Grafici TCP > Time-Sequence (Stevens)`; poi anche `Throughput` e `Round Trip Time`.
+5. Per vedere i numeri di sequenza relativi o assoluti: `Modifica > Preferenze > Protocolli > TCP > Relative sequence numbers`.
+
+### Cosa osservare
+
+- Il primo segmento (565 byte) è più corto degli altri perché contiene solo le intestazioni HTTP; poi il client invia a raffiche di due segmenti da 1460 byte, compatibile con una finestra iniziale piccola (slow start).
+- Il server invia ACK cumulativi (`Ack` = 566, 2026, 3486, ... nei primi frame) e la finestra annunciata cresce (6780, 8760, 11680, ...). Verifica tu quanti segmenti conferma ciascun ACK (esercizio 3 della traccia originale).
+- Il throughput stimato dalla soluzione (circa 30 KByte/s) si ottiene come (ultimo ACK - primo Seq)/(tempo ultimo ACK - tempo primo segmento).
+- Il grafico di Stevens mostra una crescita a "gradini" ma, come indicato nelle soluzioni, la distinzione slow start / congestion avoidance non è netta in questa traccia.
+
+### Esercizi aggiuntivi
+
+1. Calcola l'RTT del primo segmento: filtro `tcp.analysis.ack_rtt`; verifica che per il frame 2 è circa 0,023 s (tempo SYN → SYN,ACK).
+2. Con `tshark -z io,stat,1` conta frame e byte per secondo: *soluzione:* nel primo secondo 50 frame, nel secondo 36 (verificato).
+3. Riconosci i 9 pacchetti SSDP con il filtro `udp`: *soluzione:* sono verso `192.168.1.1:1900`, non c'entrano con il lab.
+4. Scrivi in un file CSV (`-T fields -E separator=,`) tempo e numero di sequenza e traccia il grafico con Python/Matplotlib.
+5. Calcola la percentuale di segmenti da 1460 byte sul totale dei segmenti di dati.
+
+### Troubleshooting
+
+- Wireshark chiede permessi per catturare: non servono per aprire un `.pcap`; servono solo per catturare dal vivo (`sudo` o gruppo `wireshark`).
+- `tshark` stampa "Running as user root ... dangerous": è un avviso, non un errore.
+- Se non vedi i campi `tcp.analysis.*`: attiva `Analizza > Protocolli abilitati` TCP e l'opzione *Analyze TCP sequence numbers*.
+
+### Pulizia
+
+Il laboratorio non modifica nulla; non salvare file di esportazione dentro il repository.
+
+---
+
+## Traccia originale e soluzioni
+
 ## Descrizione del Laboratorio
 In questo laboratorio, ci concentreremo sull'analisi approfondita del comportamento del protocollo TCP (Transmission Control Protocol). Attraverso l'esame di una traccia di segmenti TCP inviati e ricevuti durante il trasferimento di un file di 150KB (contenente "Le avventure di Alice nel Paese delle Meraviglie" di Lewis Carroll) dal tuo computer a un server remoto, esploreremo vari aspetti chiave del protocollo TCP.
 

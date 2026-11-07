@@ -1,4 +1,4 @@
-FROM ubuntu:latest
+FROM ubuntu:22.04
 
 # Aggiorna la lista dei pacchetti e installa telnetd, curl, wget e dnsutils (per dig e nslookup)
 RUN apt-get update && apt-get install -y telnetd curl wget dnsutils && apt-get clean && rm -rf /var/lib/apt/lists/*
